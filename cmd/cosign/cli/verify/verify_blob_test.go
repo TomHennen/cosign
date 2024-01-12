@@ -601,6 +601,59 @@ func TestVerifyBlob(t *testing.T) {
 	}
 }
 
+func TestVerifyBlobOfflineChain(t *testing.T) {
+	ctx := context.Background()
+	td := t.TempDir()
+
+	rootCert, rootPriv, err := test.GenerateRootCa()
+	if err != nil {
+		return nil, err
+	}
+
+	subCert, subPriv, err := test.GenerateSubordinateCa(rootCert, rootPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafCert, leafPriv, err := test.GenerateLeafCert("leaf-subject", "leaf-odic-issuer", subCert, subPriv)
+
+	signer, err := signature.LoadECDSASignerVerifier(leafPriv, crypto.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// TODO () this is duplicated elsewhere, can we share it?
+	var makeSignature = func(blob []byte) string {
+		sig, err := signer.SignMessage(bytes.NewReader(blob))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(sig)
+	}
+
+	blobBytes := []byte("foo")
+	blobSignature := makeSignature(blobBytes)
+	blobPath := writeBlobFile(t, td, string(blobBytes), "blob.txt")
+	sigPath := writeBlobFile(t, td, blobSignature, "signature.txt")
+
+	verifyBlob := VerifyBlobCmd{
+		CertVerifyOptions: options.CertVerifyOptions{
+			CertIdentityRegexp:   ".*",
+			CertOidcIssuerRegexp: ".*",
+		},
+		CertRef:    "cert.pem",
+		CertChain:  "",
+		IgnoreSCT:  true,
+		IgnoreTlog: true,
+		SigRef:     sigPath,
+	}
+
+	err = verifyBlob.Exec(ctx, blobPath)
+	if err != nil {
+		t.Fatalf("verifyBlob failed: %v", err)
+	}
+}
+
 func TestVerifyBlobCertMissingSubject(t *testing.T) {
 	ctx := context.Background()
 
