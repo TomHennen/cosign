@@ -607,7 +607,7 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 
 	rootCert, rootPriv, err := test.GenerateRootCa()
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
 
 	subCert, subPriv, err := test.GenerateSubordinateCa(rootCert, rootPriv)
@@ -615,7 +615,20 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	chainPath, err := writeChain(t, td, "chain.pem", []*x509.Certificate{subCert, rootCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	leafCert, leafPriv, err := test.GenerateLeafCert("leaf-subject", "leaf-odic-issuer", subCert, subPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPEM, err := cryptoutils.MarshalCertificateToPEM(leafCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPath := writeBlobFile(t, td, string(leafPEM), "leafcert.pem")
 
 	signer, err := signature.LoadECDSASignerVerifier(leafPriv, crypto.SHA256)
 	if err != nil {
@@ -641,8 +654,8 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 			CertIdentityRegexp:   ".*",
 			CertOidcIssuerRegexp: ".*",
 		},
-		CertRef:    "cert.pem",
-		CertChain:  "",
+		CertRef:    leafPath,
+		CertChain:  chainPath,
 		IgnoreSCT:  true,
 		IgnoreTlog: true,
 		SigRef:     sigPath,
@@ -1626,4 +1639,18 @@ func writeTimestampFile(t *testing.T, td string, ts *bundle.RFC3161Timestamp, na
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeChain(t *testing.T, td string, filename string, certs []*x509.Certificate) (string, error) {
+	var chain []byte
+
+	for _, cert := range certs {
+		pem, err := cryptoutils.MarshalCertificateToPEM(cert)
+		if err != nil {
+			return "", err
+		}
+		chain = append(chain, pem...)
+	}
+
+	return writeBlobFile(t, td, string(chain), filename), nil
 }
