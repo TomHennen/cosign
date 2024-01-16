@@ -15,12 +15,22 @@
 package verify
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	ctypes "github.com/sigstore/cosign/v2/pkg/types"
+	"github.com/sigstore/cosign/v2/test"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/signature"
+	"github.com/sigstore/sigstore/pkg/signature/dsse"
+	signatureoptions "github.com/sigstore/sigstore/pkg/signature/options"
 )
 
 const pubkey = `-----BEGIN PUBLIC KEY-----
@@ -175,6 +185,106 @@ func TestVerifyBlobAttestationNoCheckClaims(t *testing.T) {
 			}
 			if err := cmd.Exec(ctx, test.blobPath); err != nil {
 				t.Fatalf("verifyBlobAttestation()= %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyBlobAttestationOfflineChain(t *testing.T) {
+	ctx := context.Background()
+	td := t.TempDir()
+
+	rootCert, rootPriv, err := test.GenerateRootCa()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subCert, subPriv, err := test.GenerateSubordinateCa(rootCert, rootPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafCert, leafPriv, err := test.GenerateLeafCert("leaf-subject", "leaf-odic-issuer", subCert, subPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPEM, err := cryptoutils.MarshalCertificateToPEM(leafCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPath := writeBlobFile(t, td, string(leafPEM), "leafcert.pem")
+
+	signer, err := signature.LoadECDSASignerVerifier(leafPriv, crypto.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var makeSignature = func(blob []byte) string {
+		stmt := `{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"customFoo","subject":[{"name":"subject","digest":{"sha256":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}],"predicate":{}}`
+		wrapped := dsse.WrapSigner(signer, ctypes.IntotoPayloadType)
+		sig, err := wrapped.SignMessage(bytes.NewReader([]byte(stmt)), signatureoptions.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(sig)
+	}
+
+	blobBytes := []byte("foo")
+	blobSignature := makeSignature(blobBytes)
+	blobPath := writeBlobFile(t, td, string(blobBytes), "blob.txt")
+	sigPath := writeBlobFile(t, td, blobSignature, "signature.txt")
+
+	tts := []struct {
+		name       string
+		chainCerts []*x509.Certificate
+		shouldErr  bool
+	}{
+		{
+			name:       "complete chain works",
+			chainCerts: []*x509.Certificate{subCert, rootCert},
+			shouldErr:  false,
+		},
+		{
+			name:       "no intermediate fails",
+			chainCerts: []*x509.Certificate{rootCert},
+			shouldErr:  true,
+		},
+		{
+			// NOTE: This case actually passes with current usage!
+			// We assume the last entry in the chain _is_ a root, even
+			// if it's not self-signed.  So, while we'd probably
+			// prefer this to fail, it doesn't and we probably have
+			// to resolve elsewhere as noted in https://github.com/sigstore/cosign/issues/3462#issuecomment-1893129844
+			name:       "no root fails",
+			chainCerts: []*x509.Certificate{subCert},
+			shouldErr:  false,
+		},
+	}
+	for tn, tt := range tts {
+		t.Run(tt.name, func(t *testing.T) {
+			tt := tt
+
+			chainPath, err := writeChain(t, td, fmt.Sprintf("chain-%d.pem", tn), tt.chainCerts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := VerifyBlobAttestationCommand{
+				CertVerifyOptions: options.CertVerifyOptions{
+					CertIdentityRegexp:   ".*",
+					CertOidcIssuerRegexp: ".*",
+				},
+				CertRef:       leafPath,
+				CertChain:     chainPath,
+				SignaturePath: sigPath,
+				IgnoreSCT:     true,
+				IgnoreTlog:    true,
+				CheckClaims:   false,
+				PredicateType: "customFoo",
+			}
+			err = cmd.Exec(ctx, blobPath)
+
+			if (err != nil) != tt.shouldErr {
+				t.Fatalf("verifyBlobAttestation()= %s, expected shouldErr=%t ", err, tt.shouldErr)
 			}
 		})
 	}

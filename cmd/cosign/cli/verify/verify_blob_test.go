@@ -630,7 +630,6 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// TODO () this is duplicated elsewhere, can we share it?
 	var makeSignature = func(blob []byte) string {
 		sig, err := signer.SignMessage(bytes.NewReader(blob))
 		if err != nil {
