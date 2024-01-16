@@ -615,11 +615,6 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chainPath, err := writeChain(t, td, "chain.pem", []*x509.Certificate{subCert, rootCert})
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	leafCert, leafPriv, err := test.GenerateLeafCert("leaf-subject", "leaf-odic-issuer", subCert, subPriv)
 	if err != nil {
 		t.Fatal(err)
@@ -649,21 +644,58 @@ func TestVerifyBlobOfflineChain(t *testing.T) {
 	blobPath := writeBlobFile(t, td, string(blobBytes), "blob.txt")
 	sigPath := writeBlobFile(t, td, blobSignature, "signature.txt")
 
-	verifyBlob := VerifyBlobCmd{
-		CertVerifyOptions: options.CertVerifyOptions{
-			CertIdentityRegexp:   ".*",
-			CertOidcIssuerRegexp: ".*",
+	tts := []struct {
+		name       string
+		chainCerts []*x509.Certificate
+		shouldErr  bool
+	}{
+		{
+			name:       "complete chain works",
+			chainCerts: []*x509.Certificate{subCert, rootCert},
+			shouldErr:  false,
 		},
-		CertRef:    leafPath,
-		CertChain:  chainPath,
-		IgnoreSCT:  true,
-		IgnoreTlog: true,
-		SigRef:     sigPath,
+		{
+			name:       "no intermediate fails",
+			chainCerts: []*x509.Certificate{rootCert},
+			shouldErr:  true,
+		},
+		{
+			// NOTE: This case actually passes with current usage!
+			// We assume the last entry in the chain _is_ a root, even
+			// if it's not self-signed.  So, while we'd probably
+			// prefer this to fail, it doesn't and we probably have
+			// to resolve elsewhere as noted in https://github.com/sigstore/cosign/issues/3462#issuecomment-1893129844
+			name:       "no root fails",
+			chainCerts: []*x509.Certificate{subCert},
+			shouldErr:  false,
+		},
 	}
+	for tn, tt := range tts {
+		t.Run(tt.name, func(t *testing.T) {
+			tt := tt
 
-	err = verifyBlob.Exec(ctx, blobPath)
-	if err != nil {
-		t.Fatalf("verifyBlob failed: %v", err)
+			chainPath, err := writeChain(t, td, fmt.Sprintf("chain-%d.pem", tn), tt.chainCerts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			verifyBlob := VerifyBlobCmd{
+				CertVerifyOptions: options.CertVerifyOptions{
+					CertIdentityRegexp:   ".*",
+					CertOidcIssuerRegexp: ".*",
+				},
+				CertRef:    leafPath,
+				CertChain:  chainPath,
+				IgnoreSCT:  true,
+				IgnoreTlog: true,
+				SigRef:     sigPath,
+			}
+
+			err = verifyBlob.Exec(ctx, blobPath)
+			if (err != nil) != tt.shouldErr {
+				t.Fatalf("verifyBlob()= %s, expected shouldErr=%t ", err, tt.shouldErr)
+			}
+		})
 	}
 }
 
